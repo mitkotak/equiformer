@@ -1,0 +1,9 @@
+*README
+*.sdf
+*.txt
+*.log
+*.csv
+*.png
+*.npz
+*.pt
+*__pycache__
