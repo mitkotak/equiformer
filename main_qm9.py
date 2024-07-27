@@ -16,6 +16,10 @@ from datasets.pyg.qm9 import QM9
 #from torch_geometric.datasets import QM9
 #from torch_geometric.nn import SchNet
 
+import e3nn
+e3nn.set_optimization_defaults(jit_script_fx=False)
+
+
 # AMP
 from contextlib import suppress
 from timm.utils import NativeScaler
@@ -165,6 +169,7 @@ def main(args):
         drop_path=args.drop_path)
     _log.info(model)
     model = model.to(device)
+    model = torch.compile(model, fullgraph=True)
     
     model_ema = None
     if args.model_ema:

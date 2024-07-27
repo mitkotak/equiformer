@@ -505,7 +505,7 @@ class GraphAttention(torch.nn.Module):
         # inner product
         alpha = self.alpha_act(alpha)
         alpha = torch.einsum('bik, aik -> bi', alpha, self.alpha_dot)
-        alpha = torch_geometric.utils.softmax(alpha, edge_dst)
+        alpha = torch_geometric.utils.softmax(alpha, edge_dst, num_nodes=node_input.shape[0])
         alpha = alpha.unsqueeze(-1)
         if self.alpha_dropout is not None:
             alpha = self.alpha_dropout(alpha)
@@ -731,7 +731,7 @@ class EdgeDegreeEmbeddingNetwork(torch.nn.Module):
         node_features = self.scale_scatter(edge_features, edge_dst, dim=0, 
             dim_size=node_features.shape[0])
         return node_features
-    
+
 
 class GraphAttentionTransformer(torch.nn.Module):
     def __init__(self,
@@ -803,6 +803,7 @@ class GraphAttentionTransformer(torch.nn.Module):
             LinearRS(self.irreps_feature, o3.Irreps('1x0e'), rescale=_RESCALE)) 
         self.scale_scatter = ScaledScatter(_AVG_NUM_NODES)
         
+        self.sph = o3.SphericalHarmonics(irreps_out=self.irreps_edge_attr, normalize=True, normalization='component')
         self.apply(self._init_weights)
         
         
@@ -861,13 +862,10 @@ class GraphAttentionTransformer(torch.nn.Module):
         return set(no_wd_list)
         
 
-    def forward(self, f_in, pos, batch, node_atom, **kwargs) -> torch.Tensor:
+    def forward(self, f_in, pos, edge_src, edge_dst, batch, node_atom, **kwargs) -> torch.Tensor:
         
-        edge_src, edge_dst = radius_graph(pos, r=self.max_radius, batch=batch,
-            max_num_neighbors=1000)
         edge_vec = pos.index_select(0, edge_src) - pos.index_select(0, edge_dst)
-        edge_sh = o3.spherical_harmonics(l=self.irreps_edge_attr,
-            x=edge_vec, normalize=True, normalization='component')
+        edge_sh = self.sph(edge_vec)
         
         node_atom = node_atom.new_tensor([-1, 0, -1, -1, -1, -1, 1, 2, 3, 4])[node_atom]
         atom_embedding, atom_attr, atom_onehot = self.atom_embed(node_atom)

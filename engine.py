@@ -60,7 +60,8 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         #data.edge_d_index = radius_graph(data.pos, r=10.0, batch=data.batch, loop=True)
         #data.edge_d_attr = data.edge_attr
         with amp_autocast():
-            pred = model(f_in=data.x, pos=data.pos, batch=data.batch, 
+            edge_src, edge_dst = radius_graph(data.pos, r=model.max_radius, batch=data.batch, max_num_neighbors=10000)
+            pred = model(f_in=data.x, pos=data.pos, edge_src=edge_src, edge_dst=edge_dst, batch=data.batch, 
                 node_atom=data.z,
                 edge_d_index=data.edge_d_index, edge_d_attr=data.edge_d_attr)
             pred = pred.squeeze()
