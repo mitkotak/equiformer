@@ -7,6 +7,7 @@ import time
 import torch
 import numpy as np
 from torch_geometric.loader import DataLoader
+from torch_cluster import radius_graph
 
 import os
 from logger import FileLogger
@@ -31,10 +32,13 @@ from timm.utils import ModelEmaV2
 from timm.scheduler import create_scheduler
 from optim_factory import create_optimizer
 
-from engine import train_one_epoch, evaluate, compute_stats
+from engine import train_one_epoch, evaluate, compute_stats, evaluate_one_epoch
 
 # distributed training
 import utils
+
+import torch
+torch._dynamo.config.cache_size_limit = 128
 
 ModelEma = ModelEmaV2
 
@@ -118,7 +122,7 @@ def get_args_parser():
                         help='')
     parser.set_defaults(pin_mem=True)
     # AMP
-    parser.add_argument('--no-amp', action='store_false', dest='amp', 
+    parser.add_argument('--no-amp', action='store_false', dest='amp',
                         help='Disable FP16 training.')
     parser.set_defaults(amp=True)
     # distributed training parameters
@@ -136,10 +140,10 @@ def main(args):
 
     _log = FileLogger(is_master=is_main_process, is_rank0=is_main_process, output_dir=args.output_dir)
     _log.info(args)
-    
+
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-    
+
     ''' Dataset '''
     train_dataset = QM9(args.data_path, 'train', feature_type=args.feature_type)
     val_dataset   = QM9(args.data_path, 'valid', feature_type=args.feature_type)
@@ -151,26 +155,26 @@ def main(args):
     if args.standardize:
         task_mean, task_std = train_dataset.mean(args.target), train_dataset.std(args.target)
     norm_factor = [task_mean, task_std]
-    
-    # since dataset needs random 
+
+    # since dataset needs random
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-    
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    
+
     ''' Network '''
     create_model = model_entrypoint(args.model_name)
-    model = create_model(irreps_in=args.input_irreps, 
-        radius=args.radius, num_basis=args.num_basis, 
-        out_channels=args.output_channels, 
-        task_mean=task_mean, 
-        task_std=task_std, 
+    model = create_model(irreps_in=args.input_irreps,
+        radius=args.radius, num_basis=args.num_basis,
+        out_channels=args.output_channels,
+        task_mean=task_mean,
+        task_std=task_std,
         atomref=None, #train_dataset.atomref(args.target),
         drop_path=args.drop_path)
     _log.info(model)
     model = model.to(device)
-    model = torch.compile(model, fullgraph=True)
-    
+    model = torch.compile(model, dynamic=True, fullgraph=True)
+
     model_ema = None
     if args.model_ema:
         # Important to create EMA model after cuda(), DP wrapper, and AMP but before SyncBN and DDP wrapper
@@ -185,11 +189,11 @@ def main(args):
 
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
     _log.info('Number of params: {}'.format(n_parameters))
-    
+
     ''' Optimizer and LR Scheduler '''
     optimizer = create_optimizer(args, model)
     lr_scheduler, _ = create_scheduler(args, optimizer)
-    criterion = None #torch.nn.MSELoss() #torch.nn.L1Loss() # torch.nn.MSELoss() 
+    criterion = None #torch.nn.MSELoss() #torch.nn.L1Loss() # torch.nn.MSELoss()
     if args.loss == 'l1':
         criterion = torch.nn.L1Loss()
     elif args.loss == 'l2':
@@ -204,101 +208,102 @@ def main(args):
     if args.amp:
         amp_autocast = torch.cuda.amp.autocast
         loss_scaler = NativeScaler()
-    
+
     ''' Data Loader '''
     if args.distributed:
         sampler_train = torch.utils.data.DistributedSampler(
                 train_dataset, num_replicas=utils.get_world_size(), rank=utils.get_rank(), shuffle=True
             )
-        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, 
-            sampler=sampler_train, num_workers=args.workers, pin_memory=args.pin_mem, 
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
+            sampler=sampler_train, num_workers=args.workers, pin_memory=args.pin_mem,
             drop_last=True)
     else:
-        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, 
-            shuffle=True, num_workers=args.workers, pin_memory=args.pin_mem, 
+        train_loader = DataLoader(train_dataset, batch_size=args.batch_size,
+            shuffle=True, num_workers=args.workers, pin_memory=args.pin_mem,
             drop_last=True)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size)
-    
+
     ''' Compute stats '''
     if args.compute_stats:
         compute_stats(train_loader, max_radius=args.radius, logger=_log, print_freq=args.print_freq)
         return
-    
+
     best_epoch, best_train_err, best_val_err, best_test_err = 0, float('inf'), float('inf'), float('inf')
     best_ema_epoch, best_ema_val_err, best_ema_test_err = 0, float('inf'), float('inf')
     
     for epoch in range(args.epochs):
-        
-        epoch_start_time = time.perf_counter()
-        
-        lr_scheduler.step(epoch)
 
-        if args.distributed:
-            train_loader.sampler.set_epoch(epoch)
-        
-        train_err = train_one_epoch(model=model, criterion=criterion, norm_factor=norm_factor,
-            target=args.target, data_loader=train_loader, optimizer=optimizer,
-            device=device, epoch=epoch, model_ema=model_ema, 
-            amp_autocast=amp_autocast, loss_scaler=loss_scaler,
-            print_freq=args.print_freq, logger=_log)
-        
-        val_err, val_loss = evaluate(model, norm_factor, args.target, val_loader, device, 
-            amp_autocast=amp_autocast, print_freq=args.print_freq, logger=_log)
-        
-        test_err, test_loss = evaluate(model, norm_factor, args.target, test_loader, device, 
-            amp_autocast=amp_autocast, print_freq=args.print_freq, logger=_log)
-        
-        # record the best results
-        if val_err < best_val_err:
-            best_val_err = val_err
-            best_test_err = test_err
-            best_train_err = train_err
-            best_epoch = epoch
+        # epoch_start_time = time.perf_counter()
 
-        info_str = 'Epoch: [{epoch}] Target: [{target}] train MAE: {train_mae:.5f}, '.format(
-            epoch=epoch, target=args.target, train_mae=train_err)
-        info_str += 'val MAE: {:.5f}, '.format(val_err)
-        info_str += 'test MAE: {:.5f}, '.format(test_err)
-        info_str += 'Time: {:.2f}s'.format(time.perf_counter() - epoch_start_time)
-        _log.info(info_str)
-        
-        info_str = 'Best -- epoch={}, train MAE: {:.5f}, val MAE: {:.5f}, test MAE: {:.5f}\n'.format(
-            best_epoch, best_train_err, best_val_err, best_test_err)
-        _log.info(info_str)
-        
-        # evaluation with EMA
-        if model_ema is not None:
-            ema_val_err, _ = evaluate(model_ema.module, norm_factor, args.target, val_loader, device, 
-                amp_autocast=amp_autocast, print_freq=args.print_freq, logger=_log)
-            
-            ema_test_err, _ = evaluate(model_ema.module, norm_factor, args.target, test_loader, device, 
-                amp_autocast=amp_autocast, print_freq=args.print_freq, logger=_log)
-            
-            # record the best results
-            if (ema_val_err) < best_ema_val_err:
-                best_ema_val_err = ema_val_err
-                best_ema_test_err = ema_test_err
-                best_ema_epoch = epoch
+        # lr_scheduler.step(epoch)
+
+        # if args.distributed:
+        #     train_loader.sampler.set_epoch(epoch)
     
-            info_str = 'Epoch: [{epoch}] Target: [{target}] '.format(
-                epoch=epoch, target=args.target)
-            info_str += 'EMA val MAE: {:.5f}, '.format(ema_val_err)
-            info_str += 'EMA test MAE: {:.5f}, '.format(ema_test_err)
-            info_str += 'Time: {:.2f}s'.format(time.perf_counter() - epoch_start_time)
-            _log.info(info_str)
-            
-            info_str = 'Best EMA -- epoch={}, val MAE: {:.5f}, test MAE: {:.5f}\n'.format(
-                best_ema_epoch, best_ema_val_err, best_ema_test_err)
-            _log.info(info_str)
-        
-        
+        evaluate_one_epoch(model=model, data_loader=train_loader, device=device)
+        # train_err = train_one_epoch(model=model, criterion=criterion, norm_factor=norm_factor,
+        #     target=args.target, data_loader=train_loader, optimizer=optimizer,
+        #     device=device, epoch=epoch, model_ema=model_ema,
+        #     amp_autocast=amp_autocast, loss_scaler=loss_scaler,
+        #     print_freq=args.print_freq, logger=_log)
+
+        # val_err, val_loss = evaluate(model, norm_factor, args.target, val_loader, device,
+        #     amp_autocast=amp_autocast, print_freq=args.print_freq, logger=_log)
+
+        # test_err, test_loss = evaluate(model, norm_factor, args.target, test_loader, device,
+        #     amp_autocast=amp_autocast, print_freq=args.print_freq, logger=_log)
+
+        # # record the best results
+        # if val_err < best_val_err:
+        #     best_val_err = val_err
+        #     best_test_err = test_err
+        #     best_train_err = train_err
+        #     best_epoch = epoch
+
+        # info_str = 'Epoch: [{epoch}] Target: [{target}] train MAE: {train_mae:.5f}, '.format(
+        #     epoch=epoch, target=args.target, train_mae=train_err)
+        # info_str += 'val MAE: {:.5f}, '.format(val_err)
+        # info_str += 'test MAE: {:.5f}, '.format(test_err)
+        # info_str += 'Time: {:.2f}s'.format(time.perf_counter() - epoch_start_time)
+        # _log.info(info_str)
+
+        # info_str = 'Best -- epoch={}, train MAE: {:.5f}, val MAE: {:.5f}, test MAE: {:.5f}\n'.format(
+        #     best_epoch, best_train_err, best_val_err, best_test_err)
+        # _log.info(info_str)
+
+        # # evaluation with EMA
+        # if model_ema is not None:
+        #     ema_val_err, _ = evaluate(model_ema.module, norm_factor, args.target, val_loader, device,
+        #         amp_autocast=amp_autocast, print_freq=args.print_freq, logger=_log)
+
+        #     ema_test_err, _ = evaluate(model_ema.module, norm_factor, args.target, test_loader, device,
+        #         amp_autocast=amp_autocast, print_freq=args.print_freq, logger=_log)
+
+        #     # record the best results
+        #     if (ema_val_err) < best_ema_val_err:
+        #         best_ema_val_err = ema_val_err
+        #         best_ema_test_err = ema_test_err
+        #         best_ema_epoch = epoch
+
+        #     info_str = 'Epoch: [{epoch}] Target: [{target}] '.format(
+        #         epoch=epoch, target=args.target)
+        #     info_str += 'EMA val MAE: {:.5f}, '.format(ema_val_err)
+        #     info_str += 'EMA test MAE: {:.5f}, '.format(ema_test_err)
+        #     info_str += 'Time: {:.2f}s'.format(time.perf_counter() - epoch_start_time)
+        #     _log.info(info_str)
+
+        #     info_str = 'Best EMA -- epoch={}, val MAE: {:.5f}, test MAE: {:.5f}\n'.format(
+        #         best_ema_epoch, best_ema_val_err, best_ema_test_err)
+        #     _log.info(info_str)
+
+
 
 if __name__ == "__main__":
-    
+
     parser = argparse.ArgumentParser('Training equivariant networks', parents=[get_args_parser()])
-    args = parser.parse_args()  
+    args = parser.parse_args()
     if args.output_dir:
         Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     main(args)
-    
+

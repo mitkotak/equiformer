@@ -1,4 +1,5 @@
 import torch
+torch._dynamo.config.capture_scalar_outputs = True
 from torch_cluster import radius_graph
 from torch_scatter import scatter
 
@@ -728,8 +729,7 @@ class EdgeDegreeEmbeddingNetwork(torch.nn.Module):
         weight = self.rad(edge_scalars)
         edge_features = self.dw(node_features[edge_src], edge_attr, weight)
         edge_features = self.proj(edge_features)
-        node_features = self.scale_scatter(edge_features, edge_dst, dim=0, 
-            dim_size=node_features.shape[0])
+        node_features = self.scale_scatter(edge_features, edge_dst, dim=0, dim_size=node_features.shape[0])
         return node_features
 
 
@@ -889,7 +889,7 @@ class GraphAttentionTransformer(torch.nn.Module):
         if self.out_dropout is not None:
             node_features = self.out_dropout(node_features)
         outputs = self.head(node_features)
-        outputs = self.scale_scatter(outputs, batch, dim=0)
+        outputs = self.scale_scatter(outputs, batch, dim=0, dim_size=max(batch) + 1)
         
         if self.scale is not None:
             outputs = self.scale * outputs
@@ -921,7 +921,7 @@ def graph_attention_transformer_nonlinear_l2(irreps_in, radius, num_basis=128,
     atomref=None, task_mean=None, task_std=None, **kwargs):
     model = GraphAttentionTransformer(
         irreps_in=irreps_in,
-        irreps_node_embedding='128x0e+64x1e+32x2e', num_layers=2,
+        irreps_node_embedding='128x0e+64x1e+32x2e', num_layers=1,
         irreps_node_attr='1x0e', irreps_sh='1x0e+1x1e+1x2e',
         max_radius=radius,
         number_of_basis=num_basis, fc_neurons=[64, 64], 
