@@ -91,10 +91,7 @@ model = TransBlock(
 
 dataset = QM9(f'data/{args.data}', 'valid', feature_type='one_hot')
 data_loader = DataLoader(dataset, batch_size=128)
-data = None
-for dt in data_loader:
-    data = dt
-    break
+data = next(iter(data_loader))
 f_in, pos, batch, node_atom, edge_d_index, edge_d_attr = data.x, data.pos, data.batch, data.z, data.edge_d_index, data.edge_d_attr
 
 # Create Inference Features
@@ -113,10 +110,32 @@ edge_degree_embedding = EdgeDegreeEmbeddingNetwork(irreps_node_input, irreps_edg
 node_features = atom_embedding + edge_degree_embedding
 node_attr = torch.ones_like(node_features.narrow(1, 0, 1))
 
-model = torch.compile(model, fullgraph=True)
+model = torch.compile(model, fullgraph=True).to(device='cuda')
 
-model.forward(node_input=node_features, node_attr=node_attr,
-        edge_src=edge_src, edge_dst=edge_dst, edge_attr=edge_sh,
-        edge_scalars=edge_length_embedding,
-        batch=batch
+model.forward(node_input=node_features.to(device='cuda'), 
+              node_attr=node_attr.to(device='cuda'),
+              edge_src=edge_src.to(device='cuda'),
+              edge_dst=edge_dst.to(device='cuda'),
+              edge_attr=edge_sh.to(device='cuda'),
+              edge_scalars=edge_length_embedding.to(device='cuda'),
+              batch=batch.to(device='cuda')
         )
+
+with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA
+        ],
+        schedule=torch.profiler.schedule(
+            wait=1, warmup=3, active=5, repeat=1
+        ),
+    ) as p:
+        for _ in range(1 + 3 + 5):
+            model.forward(node_input=node_features, node_attr=node_attr,
+                edge_src=edge_src, edge_dst=edge_dst, edge_attr=edge_sh,
+                edge_scalars=edge_length_embedding,
+                batch=batch
+                )
+            p.step()
+
+print(p.key_averages().table(sort_by="cuda_time_total", row_limit=100))

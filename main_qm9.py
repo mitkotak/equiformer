@@ -173,7 +173,7 @@ def main(args):
         drop_path=args.drop_path)
     _log.info(model)
     model = model.to(device)
-    model = torch.compile(model, dynamic=True, fullgraph=True)
+    # model = torch.compile(model, fullgraph=True)
 
     model_ema = None
     if args.model_ema:
@@ -232,7 +232,7 @@ def main(args):
     best_epoch, best_train_err, best_val_err, best_test_err = 0, float('inf'), float('inf'), float('inf')
     best_ema_epoch, best_ema_val_err, best_ema_test_err = 0, float('inf'), float('inf')
     
-    for epoch in range(args.epochs):
+    # for epoch in range(args.epochs):
 
         # epoch_start_time = time.perf_counter()
 
@@ -241,7 +241,7 @@ def main(args):
         # if args.distributed:
         #     train_loader.sampler.set_epoch(epoch)
     
-        evaluate_one_epoch(model=model, data_loader=train_loader, device=device)
+    evaluate_one_epoch(model=model, data_loader=train_loader, device=device)
         # train_err = train_one_epoch(model=model, criterion=criterion, norm_factor=norm_factor,
         #     target=args.target, data_loader=train_loader, optimizer=optimizer,
         #     device=device, epoch=epoch, model_ema=model_ema,

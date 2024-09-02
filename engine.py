@@ -4,6 +4,7 @@ from timm.utils import accuracy, ModelEmaV2, dispatch_clip_grad
 import time
 from torch_cluster import radius_graph
 import torch_geometric
+from torch._inductor.utils import print_performance
 
 
 ModelEma = ModelEmaV2
@@ -32,11 +33,12 @@ def evaluate_one_epoch(model: torch.nn.Module,
                        data_loader: Iterable,
                        device: torch.device):
 
-    for step, data in enumerate(data_loader):
-        data = data.to(device)
-        edge_src, edge_dst = radius_graph(data.pos, r=model.max_radius, batch=data.batch, max_num_neighbors=10000)
-        pred = model(f_in=data.x, pos=data.pos, edge_src=edge_src, edge_dst=edge_dst, batch=data.batch, node_atom=data.z, edge_d_index=data.edge_d_index, edge_d_attr=data.edge_d_attr)
-
+    # for step, data in enumerate(data_loader):
+    data = next(iter(data_loader)) # Don't change data until we figure out dynamic data
+    data = data.to(device)
+    edge_src, edge_dst = radius_graph(data.pos, r=model.max_radius, batch=data.batch, max_num_neighbors=10000)
+    # pred = model(f_in=data.x, pos=data.pos, edge_src=edge_src, edge_dst=edge_dst, batch=data.batch, node_atom=data.z, edge_d_index=data.edge_d_index, edge_d_attr=data.edge_d_attr)
+    print_performance(lambda: model(f_in=data.x, pos=data.pos, edge_src=edge_src, edge_dst=edge_dst, batch=data.batch, node_atom=data.z, edge_d_index=data.edge_d_index, edge_d_attr=data.edge_d_attr))
 
 def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     norm_factor: list,
