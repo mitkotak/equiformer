@@ -173,7 +173,8 @@ def main(args):
         drop_path=args.drop_path)
     _log.info(model)
     model = model.to(device)
-    # model = torch.compile(model, fullgraph=True)
+    # the torch.zeros(...) in scatter is preventing cudagraphs
+    model = torch.compile(model, mode="max-autotune-no-cudagraphs", dynamic=True)
 
     model_ema = None
     if args.model_ema:

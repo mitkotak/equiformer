@@ -1,7 +1,7 @@
 import torch
 torch._dynamo.config.capture_scalar_outputs = True
 from torch_cluster import radius_graph
-from torch_scatter import scatter
+from torch_runstats.scatter import scatter
 
 import e3nn
 from e3nn import o3
